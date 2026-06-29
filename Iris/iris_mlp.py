@@ -132,15 +132,66 @@ def evaluate_model(
 ) -> tuple[float, float]:
     loss, accuracy = model.evaluate(x_test, y_test, verbose=0)
     predictions = np.argmax(model.predict(x_test, verbose=0), axis=1)
+    matrix = confusion_matrix(y_test, predictions)
+    class_metrics = calculate_sensitivity_specificity(matrix, target_names)
 
     print("\nEvaluacion del modelo principal")
     print(f"Perdida en prueba: {loss:.4f}")
     print(f"Precision en prueba: {accuracy:.4f}")
     print("\nMatriz de confusion:")
-    print(confusion_matrix(y_test, predictions))
+    print(matrix)
+    print("\nSensibilidad y especificidad por clase:")
+    print(f"{'Clase':<18} {'Sensibilidad':<15} {'Especificidad':<15}")
+    for metric in class_metrics:
+        print(
+            f"{metric['class_name']:<18} "
+            f"{metric['sensitivity']:<15.4f} "
+            f"{metric['specificity']:<15.4f}"
+        )
+
+    macro_sensitivity = np.mean([metric["sensitivity"] for metric in class_metrics])
+    macro_specificity = np.mean([metric["specificity"] for metric in class_metrics])
+    print(f"{'Promedio macro':<18} {macro_sensitivity:<15.4f} {macro_specificity:<15.4f}")
     print("\nReporte de clasificacion:")
     print(classification_report(y_test, predictions, target_names=target_names))
     return float(loss), float(accuracy)
+
+
+def calculate_sensitivity_specificity(
+    matrix: np.ndarray,
+    target_names: list[str],
+) -> list[dict[str, float | str]]:
+    metrics: list[dict[str, float | str]] = []
+    total = np.sum(matrix)
+
+    for class_index, class_name in enumerate(target_names):
+        true_positive = matrix[class_index, class_index]
+        false_negative = np.sum(matrix[class_index, :]) - true_positive
+        false_positive = np.sum(matrix[:, class_index]) - true_positive
+        true_negative = total - true_positive - false_negative - false_positive
+
+        sensitivity_denominator = true_positive + false_negative
+        specificity_denominator = true_negative + false_positive
+        sensitivity = (
+            true_positive / sensitivity_denominator
+            if sensitivity_denominator > 0
+            else 0.0
+        )
+        specificity = (
+            true_negative / specificity_denominator
+            if specificity_denominator > 0
+            else 0.0
+        )
+
+        metrics.append(
+            {
+                "class_name": class_name,
+                "sensitivity": float(sensitivity),
+                "specificity": float(specificity),
+            }
+        )
+
+    return metrics
 
 
 def permutation_feature_importance(
