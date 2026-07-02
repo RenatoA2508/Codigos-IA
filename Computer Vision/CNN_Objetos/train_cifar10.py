@@ -1,30 +1,42 @@
-import argparse
+import pickle
 from pathlib import Path
 
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
 
 
-CLASS_NAMES = [
-    "avion",
-    "automovil",
-    "ave",
-    "gato",
-    "ciervo",
-    "perro",
-    "rana",
-    "caballo",
-    "barco",
-    "camion",
-]
+DATA_DIR = Path("data/cifar-10-batches-py")
+MODEL_PATH = "cifar10_model.h5"
 
 
-def load_cifar10_data():
-    """Carga CIFAR-10, normaliza imagenes y convierte etiquetas a one-hot."""
-    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+def load_batch(path):
+    with path.open("rb") as file:
+        batch = pickle.load(file, encoding="latin1")
 
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
+    images = batch["data"].reshape(-1, 3, 32, 32).transpose(0, 2, 3, 1)
+    labels = np.array(batch["labels"]).reshape(-1, 1)
+    return images, labels
+
+
+def load_cifar10():
+    if DATA_DIR.exists():
+        x_train_parts = []
+        y_train_parts = []
+
+        for number in range(1, 6):
+            images, labels = load_batch(DATA_DIR / f"data_batch_{number}")
+            x_train_parts.append(images)
+            y_train_parts.append(labels)
+
+        x_train = np.concatenate(x_train_parts)
+        y_train = np.concatenate(y_train_parts)
+        x_test, y_test = load_batch(DATA_DIR / "test_batch")
+    else:
+        (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+
+    x_train = x_train / 255.0
+    x_test = x_test / 255.0
 
     y_train = tf.keras.utils.to_categorical(y_train, 10)
     y_test = tf.keras.utils.to_categorical(y_test, 10)
@@ -33,25 +45,16 @@ def load_cifar10_data():
 
 
 def build_model():
-    """Construye una CNN sencilla y clara para imagenes CIFAR-10 de 32x32."""
     model = models.Sequential(
         [
             layers.Input(shape=(32, 32, 3)),
-
-            layers.Conv2D(32, (3, 3), activation="relu", padding="same"),
-            layers.Conv2D(32, (3, 3), activation="relu", padding="same"),
+            layers.Conv2D(32, (3, 3), activation="relu"),
             layers.MaxPooling2D((2, 2)),
-
-            layers.Conv2D(64, (3, 3), activation="relu", padding="same"),
-            layers.Conv2D(64, (3, 3), activation="relu", padding="same"),
+            layers.Conv2D(64, (3, 3), activation="relu"),
             layers.MaxPooling2D((2, 2)),
-
-            layers.Conv2D(128, (3, 3), activation="relu", padding="same"),
-            layers.MaxPooling2D((2, 2)),
-
+            layers.Conv2D(64, (3, 3), activation="relu"),
             layers.Flatten(),
-            layers.Dense(128, activation="relu"),
-            layers.Dropout(0.4),
+            layers.Dense(64, activation="relu"),
             layers.Dense(10, activation="softmax"),
         ]
     )
@@ -65,46 +68,22 @@ def build_model():
     return model
 
 
-def train_model(epochs, batch_size, model_path):
-    (x_train, y_train), (x_test, y_test) = load_cifar10_data()
-    model = build_model()
+def main():
+    (x_train, y_train), (x_test, y_test) = load_cifar10()
 
+    model = build_model()
     model.summary()
 
     model.fit(
         x_train,
         y_train,
-        epochs=epochs,
-        batch_size=batch_size,
+        epochs=10,
         validation_data=(x_test, y_test),
     )
 
-    loss, accuracy = model.evaluate(x_test, y_test, verbose=0)
-    print(f"Exactitud final en test: {accuracy:.4f}")
-    print(f"Perdida final en test: {loss:.4f}")
-
-    model.save(model_path)
-    print(f"Modelo guardado en: {Path(model_path).resolve()}")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Entrena una CNN con CIFAR-10 y guarda el modelo en H5."
-    )
-    parser.add_argument("--epochs", type=int, default=10, help="Epocas de entrenamiento.")
-    parser.add_argument("--batch-size", type=int, default=64, help="Tamano de lote.")
-    parser.add_argument(
-        "--model-path",
-        default="cifar10_model.h5",
-        help="Archivo donde se guardara el modelo entrenado.",
-    )
-    return parser.parse_args()
+    model.save(MODEL_PATH)
+    print(f"Modelo guardado como {MODEL_PATH}")
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    train_model(
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        model_path=args.model_path,
-    )
+    main()

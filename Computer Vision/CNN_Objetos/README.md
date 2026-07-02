@@ -1,56 +1,67 @@
 # CNN CIFAR-10 con TensorFlow/Keras y Pygame
 
-Este proyecto entrena una red neuronal convolucional con CIFAR-10 y luego usa el modelo guardado en una interfaz Pygame para clasificar dibujos.
+Entrena una CNN con CIFAR-10 y usa el modelo guardado para clasificar imagenes de una camara en tiempo real con Pygame.
 
-## Archivos
-
-- `train_cifar10.py`: carga CIFAR-10, normaliza datos, aplica one-hot encoding, entrena la CNN y guarda `cifar10_model.h5`.
-- `clasificador_pygame.py`: abre una ventana para dibujar y clasificar usando el modelo entrenado.
-- `requirements.txt`: dependencias del proyecto.
-
-## Crear entorno virtual
-
-En esta carpeta:
+## 1. Crear entorno virtual
 
 ```bash
 ./setup_env.sh
 source .venv/bin/activate
 ```
 
-El script usa por defecto Python 3.12.13, porque TensorFlow no tiene wheel compatible con Python 3.14 en esta maquina. Si quieres indicar otro Python compatible:
+## 2. Preparar CIFAR-10
+
+Si ya tienes `cifar-10-python.tar.gz` dentro de `data/`, extraelo asi:
 
 ```bash
-PYTHON_BIN=python3.12 ./setup_env.sh
-source .venv/bin/activate
+tar -xzf data/cifar-10-python.tar.gz -C data
 ```
 
-## Entrenar el modelo
+Debe quedar esta carpeta:
+
+```text
+data/cifar-10-batches-py/
+```
+
+Si esa carpeta no existe, `train_cifar10.py` intentara descargar CIFAR-10 automaticamente con Keras.
+
+## 3. Entrenar el modelo
 
 ```bash
 python train_cifar10.py
 ```
 
-Por defecto entrena 10 epocas y guarda:
+El entrenamiento usa:
 
-```text
-cifar10_model.h5
+```python
+x_train = x_train / 255.0
+x_test = x_test / 255.0
+y_train = tf.keras.utils.to_categorical(y_train, 10)
+y_test = tf.keras.utils.to_categorical(y_test, 10)
+model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+model.fit(x_train, y_train, epochs=10, validation_data=(x_test, y_test))
+model.save("cifar10_model.h5")
 ```
 
-Tambien puedes cambiar parametros:
+## 4. Clasificar con camara
 
-```bash
-python train_cifar10.py --epochs 10 --batch-size 64 --model-path cifar10_model.h5
-```
-
-## Ejecutar la interfaz Pygame
-
-Despues de entrenar:
+Despues de entrenar y tener `cifar10_model.h5`:
 
 ```bash
 python clasificador_pygame.py
 ```
 
-Clases usadas por CIFAR-10:
+Necesitas una camara accesible para Pygame. En Linux normalmente debe existir `/dev/video0`. En WSL puede no funcionar si la camara no esta expuesta al entorno Linux.
+
+Si la imagen sale distorsionada despues de hacer `usbipd attach`, prueba OpenCV y una resolucion 16:9:
+
+```bash
+CAMERA_DEVICE=/dev/video0 CAMERA_BACKEND=opencv CAMERA_WIDTH=1280 CAMERA_HEIGHT=720 python clasificador_pygame.py
+```
+
+Tambien puedes cerrar la ventana con `Esc`.
+
+Clases CIFAR-10:
 
 ```text
 avion, automovil, ave, gato, ciervo, perro, rana, caballo, barco, camion

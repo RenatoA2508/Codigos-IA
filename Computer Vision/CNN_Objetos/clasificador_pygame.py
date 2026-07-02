@@ -1,23 +1,22 @@
 from pathlib import Path
+import os
 
 import numpy as np
 import pygame
+import pygame.camera
 import tensorflow as tf
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 MODEL_PATH = Path("cifar10_model.h5")
-WIDTH, HEIGHT = 900, 620
-CANVAS_SIZE = 512
-CANVAS_POS = (32, 54)
-PANEL_X = 590
-BACKGROUND = (245, 247, 250)
-PANEL = (232, 237, 243)
-TEXT = (32, 37, 45)
-MUTED = (95, 105, 120)
-ACCENT = (28, 115, 232)
-BAR_BG = (210, 217, 226)
-WHITE = (255, 255, 255)
-BLACK = (0, 0, 0)
+WINDOW_SIZE = (900, 600)
+PREVIEW_RECT = pygame.Rect(20, 60, 640, 480)
+DEFAULT_CAMERA_SIZE = (1280, 720)
+FALLBACK_CAMERA_SIZES = ((1280, 720), (640, 480), (320, 240))
 
 CLASS_NAMES = [
     "avion",
@@ -33,159 +32,260 @@ CLASS_NAMES = [
 ]
 
 
-class Button:
-    def __init__(self, rect, text):
-        self.rect = pygame.Rect(rect)
-        self.text = text
-
-    def draw(self, screen, font):
-        pygame.draw.rect(screen, ACCENT, self.rect, border_radius=6)
-        label = font.render(self.text, True, WHITE)
-        label_rect = label.get_rect(center=self.rect.center)
-        screen.blit(label, label_rect)
-
-    def clicked(self, event):
-        return event.type == pygame.MOUSEBUTTONDOWN and self.rect.collidepoint(event.pos)
-
-
 def load_model():
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
-            "No se encontro cifar10_model.h5. Ejecuta primero: python train_cifar10.py"
+            "No existe cifar10_model.h5. Primero ejecuta: python train_cifar10.py"
         )
     return tf.keras.models.load_model(MODEL_PATH)
 
 
-def prepare_image(canvas):
-    """Convierte el dibujo de Pygame a un tensor compatible con CIFAR-10."""
-    small = pygame.transform.smoothscale(canvas, (32, 32))
+def parse_camera_size():
+    width = os.environ.get("CAMERA_WIDTH")
+    height = os.environ.get("CAMERA_HEIGHT")
+    if not width or not height:
+        return DEFAULT_CAMERA_SIZE
+
+    try:
+        return int(width), int(height)
+    except ValueError as error:
+        raise ValueError(
+            "CAMERA_WIDTH y CAMERA_HEIGHT deben ser numeros enteros."
+        ) from error
+
+
+class OpenCVCamera:
+    def __init__(self, source, size):
+        if cv2 is None:
+            raise RuntimeError("OpenCV no esta instalado.")
+
+        capture_source = source
+        if isinstance(source, str) and source.isdigit():
+            capture_source = int(source)
+
+        self.capture = cv2.VideoCapture(capture_source, cv2.CAP_V4L2)
+        if not self.capture.isOpened():
+            self.capture.release()
+            raise RuntimeError("no se pudo abrir con OpenCV")
+
+        width, height = size
+        self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+        ok, frame = self.capture.read()
+        if not ok or frame is None:
+            self.close()
+            raise RuntimeError("OpenCV abrio la camara, pero no pudo leer frames")
+
+    def read_surface(self):
+        ok, frame = self.capture.read()
+        if not ok or frame is None:
+            raise RuntimeError("No se pudo leer un frame de la camara.")
+
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width = frame.shape[:2]
+        return pygame.image.frombuffer(frame.tobytes(), (width, height), "RGB").convert()
+
+    def close(self):
+        self.capture.release()
+
+
+class PygameCamera:
+    def __init__(self, source, size):
+        self.camera = pygame.camera.Camera(source, size, "RGB")
+        self.camera.start()
+
+    def read_surface(self):
+        return self.camera.get_image()
+
+    def close(self):
+        self.camera.stop()
+
+
+def camera_candidates():
+    cameras = pygame.camera.list_cameras()
+    camera_paths = sorted(str(path) for path in Path("/dev").glob("video*"))
+    camera_override = os.environ.get("CAMERA_DEVICE")
+    candidates = []
+
+    if camera_override:
+        candidates.append(camera_override)
+
+    candidates.extend(cameras)
+    candidates.extend(path for path in camera_paths if path not in candidates)
+
+    return candidates
+
+
+def open_camera():
+    pygame.camera.init()
+    candidates = camera_candidates()
+
+    if not candidates:
+        raise RuntimeError(
+            "No se encontro una camara disponible para Pygame. "
+            "Verifica que la camara este conectada y accesible por el sistema. "
+            "En WSL deberia existir /dev/video0 despues de hacer usbipd attach."
+        )
+
+    preferred_size = parse_camera_size()
+    backend = os.environ.get("CAMERA_BACKEND", "auto").lower()
+    errors = []
+
+    if backend == "opencv" and cv2 is None:
+        raise RuntimeError(
+            "CAMERA_BACKEND=opencv requiere instalar OpenCV. Ejecuta: "
+            "pip install -r requirements.txt"
+        )
+
+    for candidate in candidates:
+        if backend in {"auto", "opencv"} and cv2 is not None:
+            try:
+                return OpenCVCamera(candidate, preferred_size)
+            except Exception as error:
+                errors.append(f"OpenCV {candidate}: {error}")
+
+        if backend in {"auto", "pygame"}:
+            for size in (preferred_size, *FALLBACK_CAMERA_SIZES):
+                try:
+                    return PygameCamera(candidate, size)
+                except Exception as error:
+                    errors.append(f"Pygame {candidate} {size}: {error}")
+
+    raise RuntimeError(
+        "Se encontraron posibles camaras, pero no se pudo abrir ninguna. "
+        "Revisa permisos sobre /dev/video* o prueba con: "
+        "CAMERA_DEVICE=/dev/video0 CAMERA_BACKEND=opencv python clasificador_pygame.py\n"
+        + "\n".join(errors)
+    )
+
+
+def center_crop_square(surface):
+    width, height = surface.get_size()
+    side = min(width, height)
+    left = (width - side) // 2
+    top = (height - side) // 2
+    return surface.subsurface((left, top, side, side)).copy()
+
+
+def prepare_frame(frame):
+    square = center_crop_square(frame)
+    small = pygame.transform.smoothscale(square, (32, 32))
     image = pygame.surfarray.array3d(small)
     image = np.transpose(image, (1, 0, 2))
     image = image.astype("float32") / 255.0
     return np.expand_dims(image, axis=0)
 
 
-def predict(model, canvas):
-    image = prepare_image(canvas)
-    probabilities = model.predict(image, verbose=0)[0]
-    return probabilities
+def predict(model, frame):
+    image = prepare_frame(frame)
+    return model(image, training=False).numpy()[0]
 
 
-def draw_prediction_panel(screen, title_font, font, small_font, probabilities):
-    pygame.draw.rect(screen, PANEL, (PANEL_X, 54, 278, 512), border_radius=8)
+def fit_surface(surface, target_rect):
+    width, height = surface.get_size()
+    scale = min(target_rect.width / width, target_rect.height / height)
+    scaled_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    scaled = pygame.transform.smoothscale(surface, scaled_size)
+    rect = scaled.get_rect(center=target_rect.center)
+    return scaled, rect
 
-    title = title_font.render("Clasificacion", True, TEXT)
-    screen.blit(title, (PANEL_X + 24, 82))
+
+def draw_predictions(screen, font, small_font, probabilities):
+    panel_x = 680
+    pygame.draw.rect(screen, (235, 238, 242), (panel_x, 0, 220, 600))
+
+    title = font.render("Clasificacion", True, (30, 35, 45))
+    screen.blit(title, (panel_x + 20, 28))
 
     if probabilities is None:
-        waiting = font.render("Esperando dibujo", True, MUTED)
-        screen.blit(waiting, (PANEL_X + 24, 132))
+        waiting = small_font.render("Esperando camara", True, (90, 96, 110))
+        screen.blit(waiting, (panel_x + 20, 76))
         return
 
     best_index = int(np.argmax(probabilities))
-    best_text = font.render(CLASS_NAMES[best_index], True, TEXT)
-    confidence = small_font.render(f"{probabilities[best_index] * 100:.1f}%", True, MUTED)
-    screen.blit(best_text, (PANEL_X + 24, 126))
-    screen.blit(confidence, (PANEL_X + 24, 156))
-
-    top_indices = np.argsort(probabilities)[::-1][:5]
-    y = 214
-    for index in top_indices:
-        name = CLASS_NAMES[int(index)]
-        value = float(probabilities[index])
-        label = small_font.render(f"{name}  {value * 100:.1f}%", True, TEXT)
-        screen.blit(label, (PANEL_X + 24, y))
-
-        bar_width = 220
-        pygame.draw.rect(screen, BAR_BG, (PANEL_X + 24, y + 28, bar_width, 10), border_radius=5)
-        pygame.draw.rect(
-            screen,
-            ACCENT,
-            (PANEL_X + 24, y + 28, int(bar_width * value), 10),
-            border_radius=5,
-        )
-        y += 62
-
-
-def draw_canvas_border(screen):
-    pygame.draw.rect(screen, WHITE, (*CANVAS_POS, CANVAS_SIZE, CANVAS_SIZE), border_radius=8)
-    pygame.draw.rect(screen, (200, 208, 218), (*CANVAS_POS, CANVAS_SIZE, CANVAS_SIZE), 2, 8)
-
-
-def point_inside_canvas(position):
-    x, y = position
-    canvas_x, canvas_y = CANVAS_POS
-    return (
-        canvas_x <= x < canvas_x + CANVAS_SIZE
-        and canvas_y <= y < canvas_y + CANVAS_SIZE
+    best_label = font.render(CLASS_NAMES[best_index], True, (30, 35, 45))
+    confidence = small_font.render(
+        f"{probabilities[best_index] * 100:.1f}%", True, (90, 96, 110)
     )
 
+    screen.blit(best_label, (panel_x + 20, 76))
+    screen.blit(confidence, (panel_x + 20, 110))
 
-def to_canvas_point(position):
-    return position[0] - CANVAS_POS[0], position[1] - CANVAS_POS[1]
+    top_indices = np.argsort(probabilities)[::-1][:5]
+    y = 170
+
+    for index in top_indices:
+        value = float(probabilities[index])
+        label = small_font.render(
+            f"{CLASS_NAMES[int(index)]}: {value * 100:.1f}%", True, (30, 35, 45)
+        )
+        screen.blit(label, (panel_x + 20, y))
+        pygame.draw.rect(screen, (205, 211, 220), (panel_x + 20, y + 28, 160, 10))
+        pygame.draw.rect(
+            screen, (25, 110, 230), (panel_x + 20, y + 28, int(160 * value), 10)
+        )
+        y += 58
 
 
 def main():
+    camera = None
     pygame.init()
-    pygame.display.set_caption("CNN CIFAR-10")
+    pygame.display.set_caption("Clasificador CIFAR-10 con camara")
 
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    screen = pygame.display.set_mode(WINDOW_SIZE)
     clock = pygame.time.Clock()
-    title_font = pygame.font.SysFont("arial", 28, bold=True)
-    font = pygame.font.SysFont("arial", 24, bold=True)
+    font = pygame.font.SysFont("arial", 26, bold=True)
     small_font = pygame.font.SysFont("arial", 18)
 
-    model = load_model()
-    canvas = pygame.Surface((CANVAS_SIZE, CANVAS_SIZE))
-    canvas.fill(BLACK)
+    try:
+        model = load_model()
+        camera = open_camera()
 
-    clear_button = Button((PANEL_X + 24, 508, 110, 36), "Limpiar")
-    prediction = None
-    drawing = False
-    last_point = None
-    last_prediction_time = 0
+        probabilities = None
+        last_prediction_time = 0
+        running = True
 
-    running = True
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                running = False
-            elif clear_button.clicked(event):
-                canvas.fill(BLACK)
-                prediction = None
-            elif event.type == pygame.MOUSEBUTTONDOWN and point_inside_canvas(event.pos):
-                drawing = True
-                last_point = to_canvas_point(event.pos)
-            elif event.type == pygame.MOUSEBUTTONUP:
-                drawing = False
-                last_point = None
-            elif event.type == pygame.MOUSEMOTION and drawing and point_inside_canvas(event.pos):
-                current_point = to_canvas_point(event.pos)
-                if last_point is not None:
-                    pygame.draw.line(canvas, WHITE, last_point, current_point, width=18)
-                pygame.draw.circle(canvas, WHITE, current_point, 9)
-                last_point = current_point
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    running = False
 
-        now = pygame.time.get_ticks()
-        if now - last_prediction_time > 300:
-            if pygame.surfarray.array3d(canvas).max() > 0:
-                prediction = predict(model, canvas)
-            last_prediction_time = now
+            if not running:
+                break
 
-        screen.fill(BACKGROUND)
-        title = title_font.render("CNN CIFAR-10", True, TEXT)
-        screen.blit(title, (32, 16))
-        draw_canvas_border(screen)
-        screen.blit(canvas, CANVAS_POS)
-        draw_prediction_panel(screen, title_font, font, small_font, prediction)
-        clear_button.draw(screen, small_font)
+            frame = camera.read_surface()
 
-        pygame.display.flip()
-        clock.tick(60)
+            now = pygame.time.get_ticks()
+            if now - last_prediction_time >= 500:
+                probabilities = predict(model, frame)
+                last_prediction_time = now
 
-    pygame.quit()
+            screen.fill((245, 247, 250))
+            pygame.draw.rect(screen, (18, 22, 28), PREVIEW_RECT)
+            preview, preview_rect = fit_surface(frame, PREVIEW_RECT)
+            screen.blit(preview, preview_rect)
+
+            title = font.render("Camara CIFAR-10", True, (30, 35, 45))
+            screen.blit(title, (20, 18))
+
+            draw_predictions(screen, font, small_font, probabilities)
+
+            pygame.display.flip()
+            clock.tick(30)
+    finally:
+        if camera is not None:
+            try:
+                camera.close()
+            finally:
+                pygame.camera.quit()
+                pygame.quit()
+        else:
+            pygame.camera.quit()
+            pygame.quit()
 
 
 if __name__ == "__main__":

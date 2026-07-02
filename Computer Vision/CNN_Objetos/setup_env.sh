@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-DEFAULT_PYTHON="/home/renato/Desktop/5to/IA/Codigos-IA/Iris/.uv-python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12"
+DEFAULT_PYTHON="python3.12"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 
 "$PYTHON_BIN" - <<'PY'

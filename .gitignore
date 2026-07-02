@@ -14,3 +14,6 @@ env/
 
 # Modelos entrenados
 *.h5
+
+**/data/
+**/cifar-10-python.tar.gz
