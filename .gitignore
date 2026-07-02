@@ -14,6 +14,9 @@ env/
 
 # Modelos entrenados
 *.h5
+*.keras
 
 **/data/
 **/cifar-10-python.tar.gz
+**/gtsrb/
+**/archive.zip
