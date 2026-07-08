@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import sys
 
 import numpy as np
 import pygame
@@ -15,8 +16,8 @@ except ImportError:
 MODEL_PATH = Path("cifar10_model.h5")
 WINDOW_SIZE = (900, 600)
 PREVIEW_RECT = pygame.Rect(20, 60, 640, 480)
-DEFAULT_CAMERA_SIZE = (1280, 720)
-FALLBACK_CAMERA_SIZES = ((1280, 720), (640, 480), (320, 240))
+DEFAULT_CAMERA_SIZE = (640, 480)
+FALLBACK_CAMERA_SIZES = ((640, 480), (1280, 720), (320, 240))
 
 CLASS_NAMES = [
     "avion",
@@ -55,7 +56,7 @@ def parse_camera_size():
 
 
 class OpenCVCamera:
-    def __init__(self, source, size):
+    def __init__(self, source, size, force_mjpg=False):
         if cv2 is None:
             raise RuntimeError("OpenCV no esta instalado.")
 
@@ -69,7 +70,8 @@ class OpenCVCamera:
             raise RuntimeError("no se pudo abrir con OpenCV")
 
         width, height = size
-        self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        if force_mjpg:
+            self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
@@ -103,35 +105,47 @@ class PygameCamera:
         self.camera.stop()
 
 
-def camera_candidates():
-    cameras = pygame.camera.list_cameras()
+def dev_video_paths():
     camera_paths = sorted(str(path) for path in Path("/dev").glob("video*"))
+    return camera_paths
+
+
+def unique_candidates(candidates):
+    unique = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def camera_candidates(backend):
     camera_override = os.environ.get("CAMERA_DEVICE")
     candidates = []
 
     if camera_override:
-        candidates.append(camera_override)
+        return [camera_override]
 
+    if backend == "opencv":
+        candidates.extend(dev_video_paths())
+        if not candidates:
+            candidates.append("0")
+        return unique_candidates(candidates)
+
+    cameras = pygame.camera.list_cameras()
     candidates.extend(cameras)
-    candidates.extend(path for path in camera_paths if path not in candidates)
+    candidates.extend(dev_video_paths())
 
-    return candidates
+    return unique_candidates(candidates)
 
 
 def open_camera():
-    pygame.camera.init()
-    candidates = camera_candidates()
-
-    if not candidates:
-        raise RuntimeError(
-            "No se encontro una camara disponible para Pygame. "
-            "Verifica que la camara este conectada y accesible por el sistema. "
-            "En WSL deberia existir /dev/video0 despues de hacer usbipd attach."
-        )
-
     preferred_size = parse_camera_size()
-    backend = os.environ.get("CAMERA_BACKEND", "auto").lower()
+    backend = os.environ.get("CAMERA_BACKEND", "opencv").lower()
+    force_mjpg = os.environ.get("CAMERA_FORCE_MJPG", "0") == "1"
     errors = []
+
+    if backend not in {"auto", "opencv", "pygame"}:
+        raise ValueError("CAMERA_BACKEND debe ser auto, opencv o pygame.")
 
     if backend == "opencv" and cv2 is None:
         raise RuntimeError(
@@ -139,16 +153,38 @@ def open_camera():
             "pip install -r requirements.txt"
         )
 
-    for candidate in candidates:
-        if backend in {"auto", "opencv"} and cv2 is not None:
-            try:
-                return OpenCVCamera(candidate, preferred_size)
-            except Exception as error:
-                errors.append(f"OpenCV {candidate}: {error}")
-
-        if backend in {"auto", "pygame"}:
+    if backend in {"auto", "opencv"} and cv2 is not None:
+        for candidate in camera_candidates("opencv"):
             for size in (preferred_size, *FALLBACK_CAMERA_SIZES):
                 try:
+                    print(
+                        f"Probando camara con OpenCV: {candidate} {size}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return OpenCVCamera(candidate, size, force_mjpg=force_mjpg)
+                except Exception as error:
+                    errors.append(f"OpenCV {candidate} {size}: {error}")
+
+    if backend == "pygame":
+        pygame.camera.init()
+        candidates = camera_candidates("pygame")
+
+        if not candidates:
+            raise RuntimeError(
+                "No se encontro una camara disponible. "
+                "Verifica que la camara este conectada y accesible por el sistema. "
+                "En Linux normalmente deberia existir /dev/video0."
+            )
+
+        for candidate in candidates:
+            for size in (preferred_size, *FALLBACK_CAMERA_SIZES):
+                try:
+                    print(
+                        f"Probando camara con Pygame: {candidate} {size}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     return PygameCamera(candidate, size)
                 except Exception as error:
                     errors.append(f"Pygame {candidate} {size}: {error}")
